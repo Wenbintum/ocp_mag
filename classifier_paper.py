@@ -16,11 +16,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader, random_split
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
-from torch.optim.lr_scheduler import (
-    ReduceLROnPlateau,
-    CyclicLR,
-    CosineAnnealingLR,
-)
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CyclicLR, CosineAnnealingLR
 import wandb
 import numpy as np
 from scipy.ndimage import convolve1d
@@ -59,9 +55,13 @@ from data_model_utils import (
     collate_fn,
     ocp_model,
     dimenet_model,
+    cgcnn_model,
 )
 
-wandb_logger = WandbLogger(project="magmom", name="dimenet_wenbin_test")
+# wandb_logger = WandbLogger(
+#    project="magmom",
+#    name="gemnet_pure_energy_formation_per_atom",
+# )
 
 
 class MagmomClassifier(LightningModule):
@@ -78,35 +78,40 @@ class MagmomClassifier(LightningModule):
         return magmoms
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
-            self.parameters(), lr=1e-3, weight_decay=1e-6
-        )
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, weight_decay=1e-6)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": ReduceLROnPlateau(
-                    optimizer, mode="max", patience=50, factor=0.5
+                    optimizer, mode="min", patience=50, factor=0.5
                 ),
                 "interval": "epoch",
                 "frequency": 1,
-                "monitor": "val_acc",
+                "monitor": "val_loss",
             },
         }
 
     def training_step(self, batch, batch_idx):
-        energy_preds, magmom_preds = self(batch)
+        # energy_preds, magmom_preds, _ = self(batch)
+        energy_preds = self(batch)
         energy_loss = nn.L1Loss()(
-            batch.energy / batch.natoms,
-            energy_preds.squeeze().type(batch.energy.dtype),
-        )
+            batch.formation_energy_per_atom,
+            energy_preds.squeeze().type(batch.formation_energy_per_atom.dtype),
+        )  # FIXME: Try total energy and also Energy formation per atom (need the references: this is already in the CHGNET paper)
         # Only look at magmoms with magnitudes > 0.4
-        ind = torch.where(torch.abs(batch.y) > 0.4)
-        magmom_preds = magmom_preds[ind]
-        magmom_loss = nn.L1Loss()(
-            batch.y[ind], magmom_preds.squeeze().type(batch.y.dtype)
-        )
-        loss = energy_loss + magmom_loss
+        # energy_loss = 0
+        # ind = torch.where(
+        #    torch.abs(batch.y) > 0.4
+        # )  # FIXME: Can we re-weight the samples so that we don't need to lose the samples (DIR (Deep Imbalanced Regression))
+        # magmom_preds = magmom_preds[ind]
+        # magmom_loss = nn.L1Loss()(
+        #    batch.y[ind], magmom_preds.squeeze().type(batch.y.dtype)
+        # )
+        # loss = energy_loss + magmom_loss
+        loss = energy_loss
+        # loss = magmom_loss
         # yhat = self(batch)[0].squeeze()
+        # yhat = magmom_preds.squeeze()  # Logits
         # y = torch.LongTensor(
         #    [
         #        0 if (-self.boundary < magmom < self.boundary) else 1
@@ -130,7 +135,7 @@ class MagmomClassifier(LightningModule):
         ## y = torch.LongTensor(
         ##    [0 if abs(magmom) < self.boundary else 1 for magmom in batch.y]
         ## ).to(self.device)
-        ## weights = torch.tensor([0.55967772, 4.68916834]).to(self.device)  # binary
+        # weights = torch.tensor([0.55967772, 4.68916834]).to(self.device)  # binary
         # weights = torch.tensor([6.27546332, 0.37310474, 6.2329898]).to(
         #    self.device
         # )  # Three classes
@@ -163,21 +168,28 @@ class MagmomClassifier(LightningModule):
         # loss = torch.mean(loss)
         # self.log("train_loss", loss.item(), on_epoch=True)
         self.log("train_loss", loss.item(), on_epoch=True)
+        # self.log("magmom_loss_train", magmom_loss, on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        energy_preds, magmom_preds = self(batch)
+        # energy_preds, magmom_preds, _ = self(batch)
+        energy_preds = self(batch)
         energy_loss = nn.L1Loss()(
-            batch.energy, energy_preds.squeeze().type(batch.energy.dtype)
+            batch.formation_energy_per_atom,
+            energy_preds.squeeze().type(batch.formation_energy_per_atom.dtype),
         )
-        ind = torch.where(torch.abs(batch.y) > 0.4)
-        magmom_preds = magmom_preds[ind]
-        magmom_loss = nn.L1Loss()(
-            batch.y[ind], magmom_preds.squeeze().type(batch.y.dtype)
-        )
-        val_loss = energy_loss + magmom_loss
+        # energy_loss = 0
+        # ind = torch.where(torch.abs(batch.y) > 0.4)
+        # magmom_preds = magmom_preds[ind]
+        # magmom_loss_val = nn.L1Loss()(
+        #    batch.y[ind], magmom_preds.squeeze().type(batch.y.dtype)
+        # )
+        # val_loss = magmom_loss_val
+        val_loss = energy_loss
+        # val_loss = energy_loss + magmom_loss_val
         # yhat = self(batch, training=False)[0].squeeze()
-        # preds = torch.argmax(yhat, axis=1)
+        # yhat = magmom_preds  # Logits
+        # preds = torch.argmax(yhat, dim=1)
         # y = torch.LongTensor(
         #    [0 if abs(magmom) < self.boundary else 1 for magmom in batch.y]
         # ).to(self.device)
@@ -205,12 +217,15 @@ class MagmomClassifier(LightningModule):
         # val_loss = nn.MSELoss()(yhat, y)
         # val_mae = nn.L1Loss()(yhat, y)
         # total_val_loss = self.training_step(batch, batch_idx, validation=True)
-        self.log("val_loss", val_loss.item(), on_epoch=True, batch_size=16)
+        self.log("val_loss", val_loss.item(), on_epoch=True)
+        # self.log("magmom_loss_val", magmom_loss_val, on_epoch=True)
+        # self.log("energy_loss_val", energy_loss, on_epoch=True)
 
         # self.log('val_mae', val_mae.item(), on_epoch=True)
         # self.log('total_val_loss', total_val_loss.item(), on_epoch=True)
         return {
             "val_loss": val_loss,
+            #    "magmom_loss_val": magmom_loss_val
             # "num_correct": num_correct,
             # "num_samples": num_samples,
             # "yhat": preds,
@@ -233,8 +248,8 @@ class MagmomClassifier(LightningModule):
     #            .squeeze()
     #            .to(self.device)
     #        )
-    #        # f1 = BinaryF1Score().to(self.device)
-    #        f1 = F1Score(task="multiclass", num_classes=3).to(self.device)
+    #        f1 = BinaryF1Score().to(self.device)
+    #        # f1 = F1Score(task="multiclass", num_classes=3).to(self.device)
     #        val_acc = f1(yhats, ys).item() * 100.0
     #        self.log("val_acc", val_acc, rank_zero_only=True)
 
@@ -243,7 +258,7 @@ class MagmomClassifier(LightningModule):
 
 if __name__ == "__main__":
     pl.seed_everything(1, workers=True)
-    classifier_model = MagmomClassifier(dimenet_model, boundary=0.4)
+    classifier_model = MagmomClassifier(ocp_model, boundary=0.4)
     dataset_object = MyOwnDataset(structures=None, root="disk_data_FiM_FM_AFM")
     len_train_o = int(0.8 * len(dataset_object))
     len_val_o = int(0.1 * len(dataset_object))
@@ -262,49 +277,51 @@ if __name__ == "__main__":
     )
     testloader = dmo.test_dataloader()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    test_all_embs = torch.empty(0, 256)
+    test_all_embs = torch.empty(0, 128)
     classifier_model = classifier_model.to(device)
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",  # need to implement recall score (tp / (tp + fn))
         mode="min",
         dirpath="magmom_checkpoints",
-        filename="dimenet_paper-{epoch}-{step}-{val_loss:.4f}",
+        filename="gemnet_pure_form_E_only-{epoch}-{step}-{val_loss:.4f}",
     )
     learning_rate_callback = LearningRateMonitor(logging_interval="epoch")
     trainer = pl.Trainer(
-        # gpus=1,
+        gpus=1,
         # deterministic=True,
         max_epochs=10000,
         # precision=16,
         # gradient_clip_val=0.5,
         # gradient_clip_algorithm="value",
         # strategy="ddp",
-        logger=wandb_logger,
+        # logger=wandb_logger,
         callbacks=[learning_rate_callback, checkpoint_callback],
     )
-    trainer.fit(
-        classifier_model,
-        dmo.train_dataloader(),
-        dmo.val_dataloader(),
-    )
+    # trainer.fit(
+    #    classifier_model,
+    #    dmo.train_dataloader(),
+    #    dmo.val_dataloader(),
+    # )
     breakpoint()
     bmp = checkpoint_callback.best_model_path
-    bmp = (
-        "checkpoints/classifier_paper-epoch=12-step=2392-val_acc=93.6278.ckpt"
+    # bmp = "/home/jovyan/circumventing_data_imbalance_magmom_predictions/circumventing_data_imbalance_magmom_predictions/magmom_checkpoints/dimenet_segnn_onehot_regressor_all_data-epoch=152-step=364293-val_loss=0.2067.ckpt"
+    # bmp = "/home/jovyan/circumventing_data_imbalance_magmom_predictions/circumventing_data_imbalance_magmom_predictions/magmom_checkpoints/dimenet_baseline_classifier-epoch=57-step=10672-val_acc=89.8745.ckpt"
+    bmp = "/home/jovyan/circumventing_data_imbalance_magmom_predictions/circumventing_data_imbalance_magmom_predictions/magmom_checkpoints/gemnet_pure_form_E_only-epoch=5-step=14286-val_loss=0.1582.ckpt"
+    classifier_model.load_state_dict(
+        torch.load(f"{bmp}", map_location=device)["state_dict"]
     )
-    # classifier_model.load_state_dict(
-    #    torch.load(f"{bmp}", map_location=device)["state_dict"]
-    # )
     pred_masks = []
     label_masks = []
+    label_magmoms = []
+    label_form_Es = []
     with torch.no_grad():
         classifier_model.eval()  # Very important to be in inference mode
         for test_batch in testloader:
             test_batch = test_batch.to(device)
-            pred_mask, _, embedding = classifier_model(test_batch)
-            pred_masks.extend(
-                torch.argmax(pred_mask, dim=1).cpu().numpy().tolist()
-            )
+            ind = torch.where(torch.abs(test_batch.y) > 0.4)
+            # _, pred_mask, embedding = classifier_model(test_batch)
+            pred_mask = classifier_model(test_batch)
+            #            pred_masks.extend(torch.argmax(pred_mask, dim=1).cpu().numpy().tolist())
             # label_mask = [
             #    0 if abs(magmom) < classifier_model.boundary else 1
             #    for magmom in test_batch.y
@@ -317,9 +334,30 @@ if __name__ == "__main__":
             #    else 1
             #    for magmom in test_batch.y
             # ]  # ternary
+            # pred_masks.extend(pred_mask[ind].squeeze().cpu().numpy().tolist())
+            pred_masks.extend(pred_mask.squeeze().cpu().numpy().tolist())
+            # label_magmoms.extend(test_batch.y[ind].cpu().numpy().tolist())
+            label_form_Es.extend(
+                test_batch.formation_energy_per_atom.cpu().numpy().tolist()
+            )
 
             # label_masks.extend(label_mask)
-            test_all_embs = torch.vstack((test_all_embs, embedding.cpu()))
+            # test_all_embs = torch.vstack((test_all_embs, embedding.cpu()))
+    import seaborn as sns
+
+    sns.set_theme(style="ticks")
+
+    sns.jointplot(
+        x=np.array(label_form_Es), y=np.array(pred_masks), kind="hex", color="#4CB391"
+    )
+    plt.plot(
+        np.linspace(min(label_form_Es), max(label_form_Es)),
+        np.linspace(min(label_form_Es), max(label_form_Es)),
+        "k--",
+    )
+
+    plt.savefig("seaborn_parity_test_set_formation_E_per_atom_only.pdf")
+    breakpoint()
     # Histogram of the smoothed dataset
     # import seaborn as sns
 
@@ -338,50 +376,78 @@ if __name__ == "__main__":
     # fig_smooth.savefig("Smoothed_magmom_train_data.pdf")
     # breakpoint()
     # Visualize the embedding partition within the test set
+    test_all_embs = test_all_embs[:]
     figure = plt.figure(figsize=(20.0, 20.0))
     ax1 = figure.add_subplot(111)
-    reducer = umap.UMAP(random_state=42)
+    reducer = umap.UMAP()
     reduced_emb = reducer.fit_transform(test_all_embs.numpy())
 
     colors = np.array(["blue", "red", "green"])
-    mag_idx = np.where(np.array(pred_masks) == 2)  # Mag
-    no_mag_idx = np.where(np.array(pred_masks) == 1)  # No mag
+    mag_up_idx = np.where(np.array(label_masks)[:] == 2)  # Mag up
+    no_mag_idx = np.where(np.array(label_masks)[:] == 1)  # No mag
+    mag_down_idx = np.where(np.array(label_masks)[:] == 0)  # Mag down
+    breakpoint()
     ax1.scatter(
-        reduced_emb[:2, 0],
-        reduced_emb[:2, 1],
-        label="Molybdenum",
+        reduced_emb[mag_up_idx, 0],
+        reduced_emb[mag_up_idx, 1],
+        label="spin_up",
         c="magenta",
-        marker="+",
-        s=500,
         alpha=1,
+        s=200,
     )
     ax1.scatter(
-        reduced_emb[2:15, 0],
-        reduced_emb[2:15, 1],
-        label="Ruthenium",
+        reduced_emb[mag_down_idx, 0],
+        reduced_emb[mag_down_idx, 1],
+        label="spin_down",
         c="blue",
-        s=500,
-        marker="+",
         alpha=1,
+        s=200,
     )
-    ax1.scatter(
-        reduced_emb[15, 0],
-        reduced_emb[15, 1],
-        label="Platinum",
-        c="silver",
-        s=500,
-        marker="o",
-        alpha=1,
-    )
-    ax1.scatter(
-        reduced_emb[16:, 0],
-        reduced_emb[16:, 1],
-        label="Oxygen",
-        c="red",
-        marker="o",
-        s=500,
-        alpha=1,
-    )
+    # ax1.scatter(
+    #    reduced_emb[no_mag_idx, 0],
+    #    reduced_emb[no_mag_idx, 1],
+    #    label="no_mag",
+    #    c="red",
+    #    alpha=1,
+    #    s=200,
+    # )
+
+    # ax1.scatter(
+    #    reduced_emb[:2, 0],
+    #    reduced_emb[:2, 1],
+    #    label="Molybdenum",
+    #    c="magenta",
+    #    marker="+",
+    #    s=500,
+    #    alpha=1,
+    # )
+    # ax1.scatter(
+    #    reduced_emb[2:15, 0],
+    #    reduced_emb[2:15, 1],
+    #    label="Ruthenium",
+    #    c="blue",
+    #    s=500,
+    #    marker="+",
+    #    alpha=1,
+    # )
+    # ax1.scatter(
+    #    reduced_emb[15, 0],
+    #    reduced_emb[15, 1],
+    #    label="Platinum",
+    #    c="silver",
+    #    s=500,
+    #    marker="o",
+    #    alpha=1,
+    # )
+    # ax1.scatter(
+    #    reduced_emb[16:, 0],
+    #    reduced_emb[16:, 1],
+    #    label="Oxygen",
+    #    c="red",
+    #    marker="o",
+    #    s=500,
+    #    alpha=1,
+    # )
     # ax1.scatter(
     #    reduced_emb[uninteresting_idx, 0],
     #    reduced_emb[uninteresting_idx, 1],
@@ -413,4 +479,4 @@ if __name__ == "__main__":
     #    * 100
     # )
     # print(f1_score_test)
-    figure.savefig("classifier_paper_case_study_REVISION.png")
+    figure.savefig("classifier_paper_case_study_segnn_one_hot.png")

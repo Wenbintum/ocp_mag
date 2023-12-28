@@ -79,7 +79,7 @@ class MyDataModule(LightningDataModule):
             shuffle=False,
             pin_memory=True,
             persistent_workers=True,
-            num_workers=1,
+            num_workers=8,
             collate_fn=self.test_collate_fn,
         )
 
@@ -208,11 +208,19 @@ def collate_fn(batch):
     return torch_geometric.data.Batch.from_data_list(batch)
 
 
-dimenet_model = registry.get_model_class("dimenetplusplus_SEGNN")(None, -1, 1)
+dimenet_model = registry.get_model_class("dimenetplusplus_SEGNN_onehotL")(
+    None, -1, 1, regress_forces=False
+)
+cgcnn_model = registry.get_model_class("cgcnn")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+)
 ocp_model = registry.get_model_class("gemnet_oc")(
     None,
     -1,
-    3,  # out_channels
+    1,  # out_channels
     num_spherical=7,
     num_radial=128,
     num_blocks=4,
@@ -249,7 +257,7 @@ ocp_model = registry.get_model_class("gemnet_oc")(
     envelope={"name": "polynomial", "exponent": 5},
     cbf={"name": "spherical_harmonics"},
     sbf={"name": "legendre_outer"},
-    extensive=True,
+    extensive=False,
     forces_coupled=False,
     output_init="HeOrthogonal",
     activation="silu",
