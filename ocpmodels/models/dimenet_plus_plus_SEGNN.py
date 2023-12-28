@@ -586,7 +586,7 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus, BaseModel):
         x = self.emb(data.atomic_numbers.long(), rbf, i, j)
         P = self.output_blocks[0](x, rbf, i, num_nodes=pos.size(0))
         # Think we should just have another variable that shares the energy weights #YURI
-        # _M = self.out_block_mag(x, rbf, i, num_nodes=pos.size(0))
+        _M = self.out_block_mag(x, rbf, i, num_nodes=pos.size(0))
 
         # Interaction blocks.
         _iter = 0
@@ -598,7 +598,7 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus, BaseModel):
 
             #!mag, output_block takes m_ji and rbf return t_i, P is t_i
             P += output_block(x, rbf, i, num_nodes=pos.size(0))
-            # _M += output_block(x, rbf, i, num_nodes=pos.size(0))
+            _M += output_block(x, rbf, i, num_nodes=pos.size(0))
 
             #!mag, output magmom at last interaction block
             # _iter += 1
@@ -608,13 +608,13 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus, BaseModel):
         #!mag, output energy for each system but magmom for each atom
         energy = P.sum(dim=0) if batch is None else scatter(P, batch, dim=0)
 
-        return energy, P, x
+        return energy, _M
 
     def forward(self, data):
         if self.regress_forces:
             data.pos.requires_grad_(True)
 
-        energy, P, x = self._forward(data)
+        energy, _M = self._forward(data)
 
         if self.regress_forces:
             forces = -1 * (
@@ -625,9 +625,9 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus, BaseModel):
                     create_graph=True,
                 )[0]
             )
-            return energy, P, forces
+            return energy, _M, forces
         else:
-            return energy, P, x
+            return energy, _M
 
     @property
     def num_params(self) -> int:
