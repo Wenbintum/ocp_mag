@@ -684,11 +684,24 @@ def radius_graph_pbc(
     pos2 = pos2.view(-1, 3, 1).expand(-1, -1, num_cells)
     index1 = index1.view(-1, 1).repeat(1, num_cells).view(-1)
     index2 = index2.view(-1, 1).repeat(1, num_cells).view(-1)
+
+
     # Add the PBC offsets for the second atom
     pos2 = pos2 + pbc_offsets_per_atom
 
+    #print("ID:", data.frameid)
     # Compute the squared distance between atoms
-    atom_distance_sqr = torch.sum((pos1 - pos2) ** 2, dim=1)
+    if pos1.shape[0] < 100000:
+        atom_distance_sqr = torch.sum((pos1 - pos2) ** 2, dim=1)
+    else:
+        print("ID:", data.frameid)
+        del pbc_offsets_per_atom
+        del pbc_offsets
+        del data_cell
+        del unit_cell_batch
+        atom_distance_sqr = compute_squared_distances_chunked(pos1, pos2, inner_chunk_size=32, outer_chunk_size=128)
+        # atom_distance_sqr = compute_squared_distances_chunked(pos1, pos2, chunk_size=1000)
+
     atom_distance_sqr = atom_distance_sqr.view(-1)
 
     # Remove pairs that are too far apart
@@ -698,9 +711,16 @@ def radius_graph_pbc(
     mask = torch.logical_and(mask_within_radius, mask_not_same)
     index1 = torch.masked_select(index1, mask)
     index2 = torch.masked_select(index2, mask)
-    unit_cell = torch.masked_select(
-        unit_cell_per_atom.view(-1, 3), mask.view(-1, 1).expand(-1, 3)
-    )
+    #breakpoint()
+
+    if pos2.shape[0] < 80000:
+        unit_cell = torch.masked_select(
+            unit_cell_per_atom.view(-1, 3), mask.view(-1, 1).expand(-1, 3)
+        )
+    else:
+        print("Node:",len(data.atomic_numbers), "Edges:",len(data.edge_index[1]), "pos2", pos2.shape, "cell",unit_cell_per_atom.shape, "ID:", data.frameid)
+        unit_cell = masked_select_in_chunks(unit_cell_per_atom, mask, chunk_size=10000)
+
     unit_cell = unit_cell.view(-1, 3)
     atom_distance_sqr = torch.masked_select(atom_distance_sqr, mask)
 
@@ -725,6 +745,107 @@ def radius_graph_pbc(
 
     return edge_index, unit_cell, num_neighbors_image
 
+
+
+
+def compute_squared_distances_chunked(pos1, pos2, inner_chunk_size=32, outer_chunk_size=128):
+    """
+    Compute squared distances between atoms using iterative processing to avoid OOM.
+    pos1, pos2: Tensors of shape (N, 3, K) where N is the number of atoms and K is an additional dimension.
+    inner_chunk_size: Size of the inner chunk to process at a time.
+    outer_chunk_size: Size of the outer chunk to process at a time.
+    """
+    num_atoms = pos1.shape[0]
+    K = pos1.shape[2]
+
+    # Use a list to store the results on the CPU instead of a large tensor on the GPU
+    squared_distances_list = []
+
+    # Iterate over outer chunks of pos1
+    for outer_start in range(0, num_atoms, outer_chunk_size):
+        outer_end = min(outer_start + outer_chunk_size, num_atoms)
+        pos1_outer_chunk = pos1[outer_start:outer_end]
+        pos2_outer_chunk = pos2[outer_start:outer_end]
+
+        # Use a list to store the intermediate results of the outer chunk
+        outer_chunk_distances_list = []
+
+        # Iterate over inner chunks of the current outer chunk
+        for inner_start in range(0, K, inner_chunk_size):
+            inner_end = min(inner_start + inner_chunk_size, K)
+            pos1_inner_chunk = pos1_outer_chunk[:, :, inner_start:inner_end]
+            pos2_inner_chunk = pos2_outer_chunk[:, :, inner_start:inner_end]
+
+            # Compute squared distances for the inner chunk
+            dist_inner_chunk = torch.sum((pos1_inner_chunk - pos2_inner_chunk) ** 2, dim=1)
+
+            # Append the inner chunk result to the list
+            outer_chunk_distances_list.append(dist_inner_chunk)
+
+            # Free up GPU memory
+            del pos1_inner_chunk
+            del pos2_inner_chunk
+            del dist_inner_chunk
+
+        # Concatenate the intermediate results of the outer chunk
+        outer_chunk_distances = torch.cat(outer_chunk_distances_list, dim=1)
+        squared_distances_list.append(outer_chunk_distances)
+
+    # Concatenate all chunks to form the final result tensor on the CPU
+    squared_distances = torch.cat(squared_distances_list, dim=0).to(pos1.device)
+
+    return squared_distances
+
+# def compute_squared_distances_chunked(pos1, pos2, chunk_size=128):
+#     """
+#     Compute squared distances between atoms in smaller chunks to avoid OOM.
+#     pos1, pos2: Tensors of shape (N, 3, K) where N is the number of atoms and K is an additional dimension.
+#     chunk_size: Size of each chunk to process.
+#     """
+#     num_atoms = pos1.shape[0]    
+#     # Use a list to store the results instead of a large tensor
+#     squared_distances_list = []
+    
+#     # Iterate over chunks of pos1
+#     for start in range(0, num_atoms, chunk_size):
+#         end = min(start + chunk_size, num_atoms)
+#         pos1_chunk = pos1[start:end]
+#         pos2_chunk = pos2[start:end]
+        
+#         # Compute squared distances for the chunk
+#         dist_chunk = torch.sum((pos1_chunk - pos2_chunk) ** 2, dim=1)
+        
+#         # Append the chunk result to the list
+#         squared_distances_list.append(dist_chunk)
+    
+#     # Concatenate all chunks to form the final result tensor
+#     squared_distances = torch.cat(squared_distances_list, dim=0)
+    
+#     return squared_distances
+
+# def compute_squared_distances_chunked(pos1, pos2, chunk_size=128):
+#     """
+#     Compute squared distances between atoms in smaller chunks to avoid OOM.
+#     pos1, pos2: Tensors of shape (N, 3, K) where N is the number of atoms and K is an additional dimension.
+#     chunk_size: Size of each chunk to process.
+#     """
+#     num_atoms = pos1.shape[0]
+#     K = pos1.shape[2]  # Assuming pos1 and pos2 have the same third dimension
+#     squared_distances = torch.zeros((num_atoms, K), device=pos1.device)
+    
+#     # Iterate over chunks of pos1
+#     for start in range(0, num_atoms, chunk_size):
+#         end = min(start + chunk_size, num_atoms)
+#         pos1_chunk = pos1[start:end]
+#         pos2_chunk = pos2[start:end]
+        
+#         # Compute squared distances for the chunk
+#         dist_chunk = torch.sum((pos1_chunk - pos2_chunk) ** 2, dim=1)
+        
+#         # Assign the chunk to the appropriate section of the result tensor
+#         squared_distances[start:end, :] = dist_chunk
+    
+#     return squared_distances
 
 def get_max_neighbors_mask(
     natoms,
@@ -1121,3 +1242,28 @@ def scatter_det(*args, **kwargs):
         torch.use_deterministic_algorithms(mode=False)
 
     return out
+
+
+def masked_select_in_chunks(unit_cell_per_atom, mask, chunk_size=10000):
+    # Flatten unit_cell_per_atom to two dimensions for simpler indexing
+    flat_unit_cell = unit_cell_per_atom.view(-1, 3)
+
+    # Prepare to collect selected results
+    selected_results = []
+
+    # Iterate through chunks
+    for start in range(0, flat_unit_cell.size(0), chunk_size):
+        end = min(start + chunk_size, flat_unit_cell.size(0))
+
+        # Apply mask to select rows from the current chunk
+        chunk_unit_cell = flat_unit_cell[start:end]
+        chunk_mask = mask[start:end]
+
+        # Perform the masked select operation
+        selected_chunk = torch.masked_select(chunk_unit_cell, chunk_mask.unsqueeze(1)).view(-1, 3)
+
+        # Collect the results
+        selected_results.append(selected_chunk)
+
+    # Concatenate all chunks to form the final tensor
+    return torch.cat(selected_results, dim=0)

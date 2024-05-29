@@ -179,6 +179,7 @@ class OutputBlock(AtomUpdateBlock):
                 x_E = layer(x_E)  # (nAtoms, emb_size_atom)
 
         # ------------------------- Edge embeddings ------------------------ #
+        #!project rotational invariant to edge distance vector?
         if self.direct_forces:
             x_F = m
             for _, layer in enumerate(self.seq_forces):

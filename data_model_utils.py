@@ -24,9 +24,13 @@ from torch_geometric.data import Dataset
 from torch.utils.data import Dataset as DS  # collision
 from pytorch_lightning import LightningModule, LightningDataModule
 from ocpmodels.common.registry import registry
-from ocpmodels.common.utils import setup_imports
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from typing import List, Optional, TypeVar
+from torch_geometric.data import Batch
+from torch_geometric.data.data import BaseData
+import logging
+
 
 setup_imports()
 
@@ -41,6 +45,7 @@ class MyDataModule(LightningDataModule):
         train_collate_fn=None,
         val_collate_fn=None,
         test_collate_fn=None,
+        num_workers = 4, 
     ):
         self.train_set = train_set
         self.val_set = val_set
@@ -49,6 +54,7 @@ class MyDataModule(LightningDataModule):
         self.train_collate_fn = train_collate_fn
         self.val_collate_fn = val_collate_fn
         self.test_collate_fn = test_collate_fn
+        self.num_workers = num_workers
 
     def train_dataloader(self):
         return DataLoader(
@@ -56,7 +62,7 @@ class MyDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             pin_memory=True,
-            num_workers=8,
+            num_workers= self.num_workers,
             persistent_workers=True,
             collate_fn=self.train_collate_fn,
         )
@@ -68,7 +74,7 @@ class MyDataModule(LightningDataModule):
             shuffle=False,
             pin_memory=True,
             persistent_workers=True,
-            num_workers=8,
+            num_workers=self.num_workers,
             collate_fn=self.val_collate_fn,
         )
 
@@ -79,140 +85,562 @@ class MyDataModule(LightningDataModule):
             shuffle=False,
             pin_memory=True,
             persistent_workers=True,
-            num_workers=1,
+            num_workers=self.num_workers,
             collate_fn=self.test_collate_fn,
         )
 
 
+def encode_to_one_hot(values):
+    # Map the values to indices: -1 -> 0, 0 -> 1, 1 -> 2
+    indices = values + 1
+
+    # Number of classes for one-hot encoding (3 classes: -1, 0, 1)
+    num_classes = 3
+
+    # Perform one-hot encoding
+    one_hot = torch.nn.functional.one_hot(indices, num_classes=num_classes)
+
+    return one_hot
+
 class MyOwnDataset(Dataset):
-    def __init__(self, structures=None, root="disk_data"):
-        self.structures = structures
-        super(MyOwnDataset, self).__init__(root=root)
-        # if not os.path.exists("disk_data"):
-        #    os.makedirs("disk_data")
+    def __init__(self, structures=None, root="disk_data", preload=False):
+        """
+        Initialize the dataset.
+        
+        Parameters:
+        - root: The root directory where the data is stored.
+        - preload: If True, all data will be loaded into memory at once. Use with caution.
+        """
+        #breakpoint()
+        self.root = root + "/processed"
+        self.preload = preload
+        self.data_files = sorted(os.listdir(self.root))
 
-    @property
-    def raw_file_names(self):
-        return []
+        if preload:
+            # Load all data into memory
+            self.data = [self.load_file(os.path.join(self.root, file)) for file in self.data_files]
+        else:
+            self.data = None
 
-    @property
-    def processed_file_names(self):
-        return sorted(os.listdir(self.processed_dir))
+    def load_file(self, path):
+        """Utility function for loading a data file."""
+        try:
+            data = torch.load(path)
+            data.magft = encode_to_one_hot(data.magft[:, -1].long())
+            return data
+            #return torch.load(path)
+        except FileNotFoundError:
+            return None
 
     def __len__(self):
-        return len(self.processed_file_names)
-
-    #        return len(self.structures)
+        """Return the total number of samples in the dataset."""
+        return len(self.data_files)
 
     def __getitem__(self, idx):
-        # try:
-        #    data = torch.load(f"{self.processed_dir}/data_{idx}.pt")
-        # except FileNotFoundError:
-        #    return None
-        data = torch.load(f"{self.processed_dir}/data_{idx}.pt")
-        return data
+        """Retrieve a single item from the dataset."""
+        if self.preload:
+            # Return preloaded data
+            return self.data[idx]
+        else:
+            # Load data on-demand
+            file_path = os.path.join(self.root, self.data_files[idx])
 
-    def process(self):
-        count = 0
-        for i, structure in enumerate(self.structures):
-            try:
-                print(
-                    f"Encoding sample {i+1:5d}/{len(self.structures):5d}",
-                    end="\r",
-                    flush=True,
-                )
-                analyzed_structure = pg.CollinearMagneticStructureAnalyzer(
-                    structure["structure"]
-                )
-                order_list_mp.append(analyzed_structure.ordering)
-                structures_list_mp.append(structure["structure"])
-                formula_list_mp.append(structure["pretty_formula"])
-                id_list_mp.append(structure["material_id"])
-                sites_list.append(structure["nsites"])
-                node_x = embedding[
-                    torch.LongTensor(structure["structure"].atomic_numbers)
-                ]
-                # FIXME: Need to check that not all values zero for at least one row in the node feature matrix - means we are missing encoding data
-                y = torch.tensor(structure["structure"].site_properties["magmom"])
-                try:
-                    print(
-                        node_x[
-                            torch.where(node_x > 0)[0], torch.where(node_x > 0)[1]
-                        ].reshape(node_x.size(0), 3)
-                    )
-                except RuntimeError:
-                    print("Skipping since can't encode...")
-                    continue
-                if torch.where((node_x == 0.0).all(dim=1))[0].nelement() == 0:
-                    data = Data(
-                        x=node_x,
-                        # Rs_in=None,
-                        pos=torch.tensor(structure["structure"].cart_coords.copy()),
-                        cell=torch.tensor(structure["structure"].lattice.matrix.copy()),
-                        r_max=params["max_radius"],
-                        y=y,
-                        ordering=analyzed_structure.ordering,
-                        n_norm=n_norm,
-                    )
-                    torch.save(data, f"{self.processed_dir}/data_{i}.pt")
-                #                input = torch.zeros(len(struct), 3 * len_element)
-                #                for j, site in enumerate(struct):
-                #                    input[j, int(element(str(site.specie)).atomic_number)] = element(
-                #                        str(site.specie)
-                #                    ).atomic_radius
-                #                    # input[j, len_element + int(element(str(site.specie)).atomic_number) +1] = element(str(site.specie)).atomic_weight
-                #                    input[
-                #                        j,
-                #                        len_element + int(element(str(site.specie)).atomic_number) + 1,
-                #                    ] = element(str(site.specie)).en_pauling
-                #                    input[
-                #                        j,
-                #                        2 * len_element
-                #                        + int(element(str(site.specie)).atomic_number)
-                #                        + 1,
-                #                    ] = element(str(site.specie)).dipole_polarizability
-                #                    #                data.append(
-                #                    #                    DataPeriodicNeighbors(
-                #                    #                        x=input,
-                #                    #                        Rs_in=None,
-                #                    #                        pos=torch.tensor(struct.cart_coords.copy()),
-                #                    #                        lattice=torch.tensor(struct.lattice.matrix.copy()),
-                #                    #                        r_max=params["max_radius"],
-                #                    #                        y=(torch.tensor([y_values[i]])).to(torch.long),
-                #                    #                        n_norm=n_norm,
-                #                    #                    )
-                #                    #                )
-                #
-                #                    torch.save(
-                #                        DataPeriodicNeighbors(
-                #                            x=input,
-                #                            Rs_in=None,
-                #                            pos=torch.tensor(struct.cart_coords.copy()),
-                #                            lattice=torch.tensor(struct.lattice.matrix.copy()),
-                #                            r_max=params["max_radius"],
-                #                            y=(torch.tensor([y_values[i]])).to(torch.long),
-                #                            n_norm=n_norm,
-                #                        ),
-                #                        f"{self.processed_dir}/data_{i}.pt",
-                #                    )
-                count += 1
-            except Exception as e:
-                print(f"Error: {count} {e}", end="\n")
-                # count += 1
-                continue
-
+           
+            #max_neighbor = 30 for large graph 5. 
+            #cutoff = 4. 
+            return self.load_file(file_path)
 
 ####### COLLATE_FXNS ##########
 def collate_fn(batch):
     batch = list(filter(lambda x: x is not None, batch))
     return torch_geometric.data.Batch.from_data_list(batch)
 
+def data_list_collater(
+    data_list: List[BaseData], otf_graph: bool = False
+) -> BaseData:
+    batch = Batch.from_data_list(data_list)
 
-dimenet_model = registry.get_model_class("dimenetplusplus_SEGNN")(None, -1, 1)
-ocp_model = registry.get_model_class("gemnet_oc")(
+    if not otf_graph:
+        try:
+            n_neighbors = []
+            for _, data in enumerate(data_list):
+                n_index = data.edge_index[1, :]
+                n_neighbors.append(n_index.shape[0])
+            batch.neighbors = torch.tensor(n_neighbors)
+        except (NotImplementedError, TypeError):
+            logging.warning(
+                "Dataset does not contain edge index information, set otf_graph=True"
+            )
+
+    return batch
+
+dimenet_model = registry.get_model_class("dimenetplusplus_SEGNN_onehotL")(
+    None, -1, 1, regress_forces=False
+)
+cgcnn_model = registry.get_model_class("cgcnn")(
     None,
     -1,
-    3,  # out_channels
+    1,
+    regress_forces=False,
+)
+
+schnet_model = registry.get_model_class("schnet")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+)
+schnet_onehot = registry.get_model_class("schnet_onehot")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+)
+
+schnet_onehot_compareGemnet = registry.get_model_class("schnet_onehot")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+    cutoff = 12
+
+)
+
+schnet_onehot_inmag = registry.get_model_class("schnet_onehot_inmag")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+    #cutoff = 12,
+)
+
+schnet_onehot_inmag_emb = registry.get_model_class("schnet_onehot_inmag_emb")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+    #cutoff = 12,
+)
+
+schnet_onehot_inmag_fds = registry.get_model_class("schnet_onehot_inmag_fds")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+)
+
+schnet_onehot_inmag_e2e = registry.get_model_class("schnet_onehot_inmag_e2e")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+    train_e2e=True,
+    #cutoff = 12,
+)
+
+schnet_onehot_inmag_detect = registry.get_model_class("schnet_onehot_inmag_detect")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+)
+
+schnet_onehot_detect = registry.get_model_class("schnet_onehot_detect")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    otf_graph=False, #whether turn-off this?
+)
+
+schnet_segnn = registry.get_model_class("schnet_SEGNN")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    #!new 
+    segnn_gaussians = 50, #!wx
+    act = "relu",
+    num_layers_rbf = 2, 
+    num_layers_gaussian = 2,
+)
+
+schnet_sopt = registry.get_model_class("schnet_Sopt")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    #!new 
+    segnn_gaussians = 50, #!wx
+    act = "relu",
+    num_layers_rbf = 2, 
+    num_layers_gaussian = 2,
+)
+
+schnet_segnn_onehot = registry.get_model_class("schnet_SEGNN_onehot")(
+    None,
+    -1,
+    1,
+    regress_forces=False,
+    readout="mean",
+    #!new 
+    segnn_gaussians = 50, #!wx
+    act = "relu",
+    num_layers_rbf = 2, 
+    num_layers_gaussian = 2,
+)
+
+gemnet_oc_onehot = registry.get_model_class("gemnet_oc_onehot")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff = 12,   #=12.0, #!
+    cutoff_qint= 12, #12.0
+    cutoff_aeaint= 12, #12.0
+    cutoff_aint= 12, #12.0
+    max_neighbors= 30, #30
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,  #!readout?
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu", 
+    quad_interaction=True, #True
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    otf_graph=False,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes
+)
+
+gemnet_oc_onehot_inmag = registry.get_model_class("gemnet_oc_onehot_inmag")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff = 12,   #=12.0, #!
+    cutoff_qint= 12, #12.0 #!
+    cutoff_aeaint= 12, #12.0 #!
+    cutoff_aint= 12, #12.0 #!
+    max_neighbors= 30, #30
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,  #!readout?
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu", 
+    quad_interaction=True, #True #!
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    otf_graph=False,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes #!
+)
+
+gemnet_oc_onehot_inmag_emb = registry.get_model_class("gemnet_oc_onehot_inmag_emb")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff = 12,   #=12.0, #!
+    cutoff_qint= 12, #12.0 #!
+    cutoff_aeaint= 12, #12.0 #!
+    cutoff_aint= 12, #12.0 #!
+    max_neighbors= 30, #30
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,  #!readout?
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu", 
+    quad_interaction=True, #True #!
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    otf_graph=False,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes #!
+)
+
+
+
+gemnet_oc_onehot_inmag_emb_customize = registry.get_model_class("gemnet_oc_onehot_inmag_emb")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff = 8,   #=12.0, #! generate_graph_dict
+    cutoff_qint= 12, #12.0 #! if cut_off > 6 or max_neighbors > 50
+    cutoff_aeaint= 12, #12.0 #!
+    cutoff_aint= 12, #12.0 #!
+    max_neighbors= 30, #30
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,  #!readout?
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu", 
+    quad_interaction=True, #True #!
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    otf_graph=False,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes #!
+)
+
+
+
+
+
+gemnet_oc_onehot_inmag_light = registry.get_model_class("gemnet_oc_onehot_inmag")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff = 10,   #!12.0, 
+    cutoff_qint= 10, #!12.0
+    cutoff_aeaint= 10, #!12.0
+    cutoff_aint= 10, #!12.0
+    max_neighbors= 30, #30
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,  #!readout?
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu", 
+    quad_interaction=True, #True #!
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    otf_graph=False,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes
+)
+
+
+
+
+
+gemnet_oc_dev = registry.get_model_class("gemnet_oc_dev")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=256, #!512
+    emb_size_trip_in=32, #!64
+    emb_size_trip_out=32, #!64
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=32, #!64
+    emb_size_aint_out=32, #!64
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff = 12,   #=12.0, #!
+    cutoff_qint= 12, #12.0
+    cutoff_aeaint= 12, #12.0
+    cutoff_aint= 12, #12.0
+    max_neighbors= 30, #30
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,  #!readout?
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu", 
+    quad_interaction=True, #True
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    otf_graph=False,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes
+)
+
+
+gemnet_oc_segnn = registry.get_model_class("gemnet_oc_SEGNN")(
+    None,
+    -1,
+    1,  # out_channels
     num_spherical=7,
     num_radial=128,
     num_blocks=4,
@@ -249,7 +677,64 @@ ocp_model = registry.get_model_class("gemnet_oc")(
     envelope={"name": "polynomial", "exponent": 5},
     cbf={"name": "spherical_harmonics"},
     sbf={"name": "legendre_outer"},
-    extensive=True,
+    extensive=False,
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu",
+#!    quad_interaction=False,  #switch ?
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    # otf_graph=True,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes
+    #!new
+    segnn_gaussians = 50,
+)
+
+
+
+ocp_model = registry.get_model_class("gemnet_oc")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff=8,    #12
+    cutoff_qint=8, #12
+    cutoff_aeaint=8, #12
+    cutoff_aint=8, #12
+    max_neighbors=30,
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,
     forces_coupled=False,
     output_init="HeOrthogonal",
     activation="silu",
@@ -262,6 +747,58 @@ ocp_model = registry.get_model_class("gemnet_oc")(
     qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes
 )
 
+gemnet_oc_2d = registry.get_model_class("gemnet_oc_2d")(
+    None,
+    -1,
+    2,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff=12.0,
+    cutoff_qint=12.0,
+    cutoff_aeaint=12.0,
+    cutoff_aint=12.0,
+    max_neighbors=30,
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu",
+    quad_interaction=True,
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    # otf_graph=True,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes
+)
 
 class EmbeddingData(DS):
     def __init__(self, filename):

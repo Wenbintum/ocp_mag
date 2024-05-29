@@ -61,6 +61,7 @@ except ImportError:
 from functools import reduce
 from .gemnet.layers.base_layers import Dense
 
+
 class InteractionPPBlock(torch.nn.Module):
     def __init__(
         self,
@@ -297,15 +298,14 @@ class DimeNetPlusPlus(torch.nn.Module):
         )
 
         #!mag, for regressing magmom
-        self.out_block_mag =  OutputPPBlock(
-                    num_radial,
-                    hidden_channels,
-                    out_emb_channels,
-                    out_channels,
-                    num_output_layers,
-                    act,
-                )
-
+        self.out_block_mag = OutputPPBlock(
+            num_radial,
+            hidden_channels,
+            out_emb_channels,
+            out_channels,
+            num_output_layers,
+            act,
+        )
 
         self.reset_parameters()
 
@@ -319,7 +319,6 @@ class DimeNetPlusPlus(torch.nn.Module):
 
         #!mag
         self.out_block_mag.reset_parameters()
-
 
     def triplets(self, edge_index, cell_offsets, num_nodes: int):
         row, col = edge_index  # j->i
@@ -459,20 +458,20 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus, BaseModel):
             x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)
             P += output_block(x, rbf, i, num_nodes=pos.size(0))
 
-            #!mag 
-            _iter+=1
-            if _iter == self.num_blocks - 1:
-                _M = self.out_block_mag(x, rbf, i, num_nodes=pos.size(0))
+            ##!mag
+            # _iter+=1
+            # if _iter == self.num_blocks - 1:
+            #    _M = self.out_block_mag(x, rbf, i, num_nodes=pos.size(0))
 
         energy = P.sum(dim=0) if batch is None else scatter(P, batch, dim=0)
 
         #!mag
-        return energy, _M
+        return energy, P, x
 
     def forward(self, data):
         if self.regress_forces:
             data.pos.requires_grad_(True)
-        energy, _M = self._forward(data)
+        energy, P, x = self._forward(data)
 
         if self.regress_forces:
             forces = -1 * (
@@ -483,10 +482,10 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus, BaseModel):
                     create_graph=True,
                 )[0]
             )
-        #!mag
-            return energy, _M, forces
+            #!mag
+            return energy, P, forces
         else:
-            return energy, _M
+            return energy, P, x
 
     @property
     def num_params(self) -> int:

@@ -17,3 +17,4 @@ from .painn.painn import PaiNN
 from .schnet import SchNetWrap as SchNet
 from .scn.scn import SphericalChannelNetwork
 from .spinconv import spinconv
+from .gemnet_oc.gemnet_oc_onehot import GemNetOC

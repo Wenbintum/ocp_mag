@@ -339,6 +339,38 @@ class GemNetOC(BaseModel):
             )
         self.out_blocks = torch.nn.ModuleList(out_blocks)
 
+#ANCHOR >>>>>>
+        out_blocks_mag = []
+        for _ in range(num_blocks + 1):
+            out_blocks_mag.append(
+                OutputBlock(
+                    emb_size_atom=emb_size_atom,
+                    emb_size_edge=emb_size_edge,
+                    emb_size_rbf=emb_size_rbf,
+                    nHidden=num_atom,
+                    nHidden_afteratom=num_output_afteratom,
+                    activation=activation,
+                    direct_forces=direct_forces,
+                )
+            )
+        self.out_blocks_mag = torch.nn.ModuleList(out_blocks_mag)
+        out_mlp_mag = [
+            Dense(
+                emb_size_atom * (num_blocks + 1),
+                emb_size_atom,
+                activation=activation,
+            )
+        ] + [
+            ResidualLayer(
+                emb_size_atom,
+                activation=activation,
+            )
+            for _ in range(num_global_out_layers)
+        ]
+        self.out_mlp_mag = torch.nn.Sequential(*out_mlp_mag)
+
+
+
         out_mlp_E = [
             Dense(
                 emb_size_atom * (num_blocks + 1),
@@ -353,9 +385,16 @@ class GemNetOC(BaseModel):
             for _ in range(num_global_out_layers)
         ]
         self.out_mlp_E = torch.nn.Sequential(*out_mlp_E)
+
+
         self.out_energy = Dense(
             emb_size_atom, num_targets, bias=False, activation=None
         )
+#!wx
+        self.out_mag = Dense(
+            emb_size_atom, num_targets, bias=False, activation=None
+        )
+
         if direct_forces:
             out_mlp_F = [
                 Dense(
@@ -377,8 +416,10 @@ class GemNetOC(BaseModel):
 
         out_initializer = get_initializer(output_init)
         self.out_energy.reset_parameters(out_initializer)
+        self.out_mag.reset_parameters(out_initializer) #!wx
+
         if direct_forces:
-            self.out_forces.reset_parameters(out_initializer)
+            self.out_forces.reset_parameters(out_initializer) 
 
         load_scales_compat(self, scale_file)
 
@@ -1275,6 +1316,8 @@ class GemNetOC(BaseModel):
         # (nEdges, emb_size_edge)
 
         x_E, x_F = self.out_blocks[0](h, m, basis_output, idx_t)
+        x_M, _   = self.out_blocks_mag[0](h, m, basis_output, idx_t)#!wx
+        xs_M = [x_M]#!wx
         # (nAtoms, emb_size_atom), (nEdges, emb_size_edge)
         xs_E, xs_F = [x_E], [x_F]
 
@@ -1300,16 +1343,29 @@ class GemNetOC(BaseModel):
             )  # (nAtoms, emb_size_atom), (nEdges, emb_size_edge)
 
             x_E, x_F = self.out_blocks[i + 1](h, m, basis_output, idx_t)
+
+            
+            x_M, _   = self.out_blocks_mag[i + 1](h, m, basis_output, idx_t) 
+            #!wx
+            xs_M.append(x_M) #!wx
+
+
             # (nAtoms, emb_size_atom), (nEdges, emb_size_edge)
             xs_E.append(x_E)
             xs_F.append(x_F)
 
+        # import pdb; pdb.set_trace()
         # Global output block for final predictions
         x_E = self.out_mlp_E(torch.cat(xs_E, dim=-1))
+
+        x_M = self.out_mlp_mag(torch.cat(xs_M, dim=-1)) #!wx
+
         if self.direct_forces:
             x_F = self.out_mlp_F(torch.cat(xs_F, dim=-1))
         with torch.cuda.amp.autocast(False):
             E_t = self.out_energy(x_E.float())
+            M_t = self.out_mag(x_M.float()) #!wx M_t has a set of preds.
+
             if self.direct_forces:
                 F_st = self.out_forces(x_F.float())
 
@@ -1322,7 +1378,8 @@ class GemNetOC(BaseModel):
             E_t = scatter_det(
                 E_t, batch, dim=0, dim_size=nMolecules, reduce="mean"
             )  # (nMolecules, num_targets)
-
+#!wx at the moment regress_forces is False
+        # import pdb; pdb.set_trace()
         if self.regress_forces:
             if self.direct_forces:
                 if self.forces_coupled:  # enforce F_st = F_ts
@@ -1356,10 +1413,12 @@ class GemNetOC(BaseModel):
 
             E_t = E_t.squeeze(1)  # (num_molecules)
             F_t = F_t.squeeze(1)  # (num_atoms, 3)
-            return E_t, F_t
+            M_t = M_t.squeeze(1)  # (num_molecules)
+            return E_t, F_t, M_t
         else:
             E_t = E_t.squeeze(1)  # (num_molecules)
-            return E_t
+            M_t = M_t.squeeze(1)  # (num_molecules)
+            return E_t, M_t
 
     @property
     def num_params(self) -> int:
