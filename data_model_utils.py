@@ -221,6 +221,18 @@ schnet_onehot_inmag = registry.get_model_class("schnet_onehot_inmag")(
     #cutoff = 12,
 )
 
+schnet_onehot_inmag_FF = registry.get_model_class("schnet_onehot_inmag_FF")(
+    None,
+    -1,
+    1,
+    regress_forces=True,
+    regress_stress=True,
+    readout="mean",
+    otf_graph=True, #whether turn-off this? #!cell should be used if compute strain?
+    #cutoff = 12,
+)
+
+
 schnet_onehot_inmag_emb = registry.get_model_class("schnet_onehot_inmag_emb")(
     None,
     -1,
