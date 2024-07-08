@@ -425,7 +425,60 @@ gemnet_oc_onehot_inmag = registry.get_model_class("gemnet_oc_onehot_inmag")(
     otf_graph=False,
     qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes #!
 )
-
+gemnet_oc_onehot_inmag_ff = registry.get_model_class("gemnet_oc_onehot_inmag_ff")(
+    None,
+    -1,
+    1,  # out_channels
+    num_spherical=7,
+    num_radial=128,
+    num_blocks=4,
+    emb_size_atom=256,
+    emb_size_edge=512,
+    emb_size_trip_in=64,
+    emb_size_trip_out=64,
+    emb_size_quad_in=32,
+    emb_size_quad_out=32,
+    emb_size_aint_in=64,
+    emb_size_aint_out=64,
+    emb_size_rbf=16,
+    emb_size_cbf=16,
+    emb_size_sbf=32,
+    num_before_skip=2,
+    num_after_skip=2,
+    num_concat=1,
+    num_atom=3,
+    num_output_afteratom=3,
+    num_atom_emb_layers=2,
+    num_global_out_layers=2,
+    regress_forces=False,
+    direct_forces=True,
+    use_pbc=True,
+    cutoff = 12,   #=12.0, #!
+    cutoff_qint= 12, #12.0 #!
+    cutoff_aeaint= 12, #12.0 #!
+    cutoff_aint= 12, #12.0 #!
+    max_neighbors= 30, #30
+    max_neighbors_qint=8,
+    max_neighbors_aeaint=20,
+    max_neighbors_aint=1000,
+    rbf={"name": "gaussian"},
+    envelope={"name": "polynomial", "exponent": 5},
+    cbf={"name": "spherical_harmonics"},
+    sbf={"name": "legendre_outer"},
+    extensive=False,  #!readout?
+    forces_coupled=False,
+    output_init="HeOrthogonal",
+    activation="silu", 
+    quad_interaction=True, #True #!
+    atom_edge_interaction=True,
+    edge_atom_interaction=True,
+    atom_interaction=True,
+    num_elements=100,
+    otf_graph=False,
+    qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes #!
+    regress_forces=True,
+    regress_stress=True,
+)
 gemnet_oc_onehot_inmag_emb = registry.get_model_class("gemnet_oc_onehot_inmag_emb")(
     None,
     -1,
