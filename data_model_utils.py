@@ -127,6 +127,8 @@ class MyOwnDataset(Dataset):
         try:
             data = torch.load(path)
             data.magft = encode_to_one_hot(data.magft[:, -1].long())
+            if data.stress.shape[0] != 1:
+                data.stress = data.stress.unsqueeze(0)
             return data
             #return torch.load(path)
         except FileNotFoundError:

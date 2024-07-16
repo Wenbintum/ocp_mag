@@ -165,7 +165,7 @@ class MagmomClassifier(LightningModule):
 
         force_loss = nn.L1Loss()(batch.force, force_preds)
 
-        batch_stress_decomposition = torch.einsum("ab, cb->ca", self.change_mat.to(self.device), batch.stress)
+        batch_stress_decomposition = torch.einsum("ab, cb->ca", self.change_mat.to(self.device), batch.stress.reshape(-1, 9))
         stress_isotropic_target = batch_stress_decomposition[:, 0]
         stress_anisotropic_target = batch_stress_decomposition[:, 4:9]
         
@@ -205,10 +205,10 @@ class MagmomClassifier(LightningModule):
 
         force_loss = nn.L1Loss()(batch.force, force_preds)
 
-        batch_stress_decomposition = torch.einsum("ab, cb->ca", self.change_mat.to(self.device), batch.stress)
+        batch_stress_decomposition = torch.einsum("ab, cb->ca", self.change_mat.to(self.device), batch.stress.reshape(-1, 9))
         stress_isotropic_target = batch_stress_decomposition[:, 0]
         stress_anisotropic_target = batch_stress_decomposition[:, 4:9]
-        
+
         stress_loss = nn.L1Loss()(stress_iso.reshape(-1), stress_isotropic_target)
         stress_loss += nn.L1Loss()(stress_aniso.reshape(-1, 5), stress_anisotropic_target)
 
