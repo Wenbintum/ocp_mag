@@ -93,6 +93,34 @@ class MagmomClassifier(LightningModule):
 
         self.save_hyperparameters()
 
+        self.change_mat = (
+            torch.tensor(
+                [
+                    [3 ** (-0.5), 0, 0, 0, 3 ** (-0.5), 0, 0, 0, 3 ** (-0.5)],
+                    [0, 0, 0, 0, 0, 2 ** (-0.5), 0, -(2 ** (-0.5)), 0],
+                    [0, 0, -(2 ** (-0.5)), 0, 0, 0, 2 ** (-0.5), 0, 0],
+                    [0, 2 ** (-0.5), 0, -(2 ** (-0.5)), 0, 0, 0, 0, 0],
+                    [0, 0, 0.5**0.5, 0, 0, 0, 0.5**0.5, 0, 0],
+                    [0, 2 ** (-0.5), 0, 2 ** (-0.5), 0, 0, 0, 0, 0],
+                    [
+                        -(6 ** (-0.5)),
+                        0,
+                        0,
+                        0,
+                        2 * 6 ** (-0.5),
+                        0,
+                        0,
+                        0,
+                        -(6 ** (-0.5)),
+                    ],
+                    [0, 0, 0, 0, 0, 2 ** (-0.5), 0, 2 ** (-0.5), 0],
+                    [-(2 ** (-0.5)), 0, 0, 0, 0, 0, 0, 0, 2 ** (-0.5)],
+                ]
+            )
+            .detach()
+            .to(self.device)
+        )
+
     def forward(self, x, training=True):
         if not training:
             self.backbone.eval()
@@ -122,7 +150,7 @@ class MagmomClassifier(LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        energy_preds, magmom_preds, force_preds, stress_preds = self(batch)
+        energy_preds, magmom_preds, force_preds, stress_iso, stress_aniso = self(batch)
         energy_loss = nn.L1Loss()(
             batch.corr_energy_per_atom,
             energy_preds.squeeze().type(batch.corr_energy_per_atom.dtype),
@@ -137,14 +165,17 @@ class MagmomClassifier(LightningModule):
 
         force_loss = nn.L1Loss()(batch.force, force_preds)
 
-
-        stress_loss = nn.L1Loss()(batch.stress, stress_preds.view(len(batch.natoms)*3, 3))
-
+        batch_stress_decomposition = torch.einsum("ab, cb->ca", self.change_mat.to(self.device), batch.stress)
+        stress_isotropic_target = batch_stress_decomposition[:, 0]
+        stress_anisotropic_target = batch_stress_decomposition[:, 4:9]
+        
+        stress_loss = nn.L1Loss()(stress_iso.reshape(-1), stress_isotropic_target)
+        stress_loss += nn.L1Loss()(stress_aniso.reshape(-1, 5), stress_anisotropic_target)
+        
         energy_loss = self.energy_w*energy_loss
         magmom_loss = self.magmom_w*magmom_loss
         force_loss = self.force_w*force_loss
         stress_loss = self.stress_w*stress_loss
-
 
         loss = energy_loss + magmom_loss + force_loss  + stress_loss
 
@@ -159,7 +190,7 @@ class MagmomClassifier(LightningModule):
 
 
     def validation_step(self, batch, batch_idx):
-        energy_preds, magmom_preds, force_preds, stress_preds  = self(batch)
+        energy_preds, magmom_preds, force_preds, stress_iso, stress_aniso  = self(batch)
         energy_loss = nn.L1Loss()(
             batch.corr_energy_per_atom,
             energy_preds.squeeze().type(batch.corr_energy_per_atom.dtype),
@@ -174,14 +205,17 @@ class MagmomClassifier(LightningModule):
 
         force_loss = nn.L1Loss()(batch.force, force_preds)
 
-
-        stress_loss = nn.L1Loss()(batch.stress, stress_preds.view(len(batch.natoms)*3, 3))
+        batch_stress_decomposition = torch.einsum("ab, cb->ca", self.change_mat.to(self.device), batch.stress)
+        stress_isotropic_target = batch_stress_decomposition[:, 0]
+        stress_anisotropic_target = batch_stress_decomposition[:, 4:9]
+        
+        stress_loss = nn.L1Loss()(stress_iso.reshape(-1), stress_isotropic_target)
+        stress_loss += nn.L1Loss()(stress_aniso.reshape(-1, 5), stress_anisotropic_target)
 
         energy_loss = self.energy_w*energy_loss
         magmom_loss = self.magmom_w*magmom_loss
         force_loss = self.force_w*force_loss
         stress_loss = self.stress_w*stress_loss
-
 
         val_loss = energy_loss + magmom_loss + force_loss + stress_loss
 
@@ -204,7 +238,7 @@ class MagmomClassifier(LightningModule):
 
 if __name__ == "__main__":
 
-    file_name= "schnet_FF"
+    file_name= "gemnet_FF"
     wandb_logger = WandbLogger(project="magmom_paper_new",
                                 # id  = "qe0yyceb" ,
                                 # resume = "must",

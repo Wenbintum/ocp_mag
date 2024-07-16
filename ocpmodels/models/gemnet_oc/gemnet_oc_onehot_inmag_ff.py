@@ -462,6 +462,11 @@ class GemNetOC(BaseModel):
         envelope_exponent: int = 5,
         hidden_channels: int = 256,
         regress_stress=True,
+        direct_stress=True,
+        outer_product_stress: bool = False,
+        decomposition_stress: bool = True,
+        edge_level: bool = True,
+        extensive_stress: bool = False,
         **kwargs,  # backwards compatibility with deprecated arguments
     ) -> None:
         super().__init__()
@@ -496,6 +501,11 @@ class GemNetOC(BaseModel):
         self.forces_coupled = forces_coupled
         self.regress_forces = regress_forces
         self.regress_stress = regress_stress
+        self.direct_stress = direct_stress
+        self.outer_product_stress = outer_product_stress
+        self.decomposition_stress = decomposition_stress
+        self.edge_level = edge_level
+        self.extensive_stress = extensive_stress
         self.force_scaler = ForceScaler(enabled=scale_backprop_forces)
 
         self.init_basis_functions(
@@ -628,7 +638,23 @@ class GemNetOC(BaseModel):
             self.out_forces = Dense(
                 emb_size_edge, num_targets, bias=False, activation=None
             )
-
+        if regress_stress and direct_stress:
+            out_mlp_S = [
+                Dense(
+                    emb_size_edge * (num_blocks + 1),
+                    emb_size_edge,
+                    activation=activation,
+                )
+            ]
+            out_mlp_S += [
+                ResidualLayer(
+                    emb_size_edge,
+                    activation=activation,
+                )
+                for _ in range(num_global_out_layers)
+            ]
+            self.out_mlp_S = torch.nn.Sequential(*out_mlp_S)
+            
         out_initializer = get_initializer(output_init)
         self.out_energy.reset_parameters(out_initializer)
         if direct_forces:
@@ -1606,7 +1632,9 @@ class GemNetOC(BaseModel):
 
         if self.direct_forces:
             x_F = self.out_mlp_F(torch.cat(xs_F, dim=-1))
-
+        if self.direct_stress:
+            S_st = self.out_mlp_S(torch.cat(xs_F, dim=-1))
+            
         with torch.cuda.amp.autocast(False):
             E_t = self.out_energy(x_E.float())
             M_pred = self.out_M(x_M.float())
@@ -1685,7 +1713,7 @@ class GemNetOC(BaseModel):
                 S_t_scalar = torch.einsum("ab, cb->ca", self.change_mat.to(stress.device), S_t.reshape(-1, 9))[:, 0]
                 S_t_irrep2 = torch.einsum("ab, cb->ca", self.change_mat.to(stress.device), S_t.reshape(-1, 9))[:, 4:9]
 
-        return E_t.squeeze(1), M_pred, F_t, S_t_scalar, S_t_irrep2
+        return E_t, M_pred, F_t, S_t_scalar, S_t_irrep2
     @property
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())
@@ -1769,131 +1797,252 @@ class Rank2Block(nn.Module):
         return stress
 
 
-class Rank2DecompositionEdgeBlock(nn.Module):
-    """
-    Output block for predicting rank-2 tensors (stress, dielectric tensor).
-    Decomposes a rank-2 symmetric tensor into irrep degree 0 and 2.
+# class Rank2DecompositionEdgeBlock(nn.Module):
+#     """
+#     Output block for predicting rank-2 tensors (stress, dielectric tensor).
+#     Decomposes a rank-2 symmetric tensor into irrep degree 0 and 2.
 
-    Args:
-        emb_size (int):     Size of edge embedding used to compute outer product
-        num_layers (int):   Number of layers of the MLP
-        edge_level (bool):  Apply MLP to edges' outer product
-        extensive (bool):   Whether to sum or average the outer products
+#     Args:
+#         emb_size (int):     Size of edge embedding used to compute outer product
+#         num_layers (int):   Number of layers of the MLP
+#         edge_level (bool):  Apply MLP to edges' outer product
+#         extensive (bool):   Whether to sum or average the outer products
+#     """
+
+#     def __init__(
+#         self,
+#         emb_size: int,
+#         num_layers: int = 2,
+#         edge_level: bool = False,
+#         extensive: bool = False,
+#     ):
+#         super().__init__()
+#         self.emb_size = emb_size
+#         self.edge_level = edge_level
+#         self.extensive = extensive
+#         self.scalar_nonlinearity = nn.SiLU()
+#         self.scalar_MLP = nn.Sequential()
+#         self.irrep2_MLP = nn.Sequential()
+#         for i in range(num_layers):
+#             if i < num_layers - 1:
+#                 self.scalar_MLP.append(nn.Linear(emb_size, emb_size))
+#                 self.irrep2_MLP.append(nn.Linear(emb_size, emb_size))
+#                 self.scalar_MLP.append(self.scalar_nonlinearity)
+#                 self.irrep2_MLP.append(self.scalar_nonlinearity)
+#             else:
+#                 self.scalar_MLP.append(nn.Linear(emb_size, 1))
+#                 self.irrep2_MLP.append(nn.Linear(emb_size, 1))
+
+#         # Change of basis obtained by stacking the C-G coefficients
+#         self.change_mat = torch.transpose(
+#             torch.tensor(
+#                 [
+#                     [3 ** (-0.5), 0, 0, 0, 3 ** (-0.5), 0, 0, 0, 3 ** (-0.5)],
+#                     [0, 0, 0, 0, 0, 2 ** (-0.5), 0, -(2 ** (-0.5)), 0],
+#                     [0, 0, -(2 ** (-0.5)), 0, 0, 0, 2 ** (-0.5), 0, 0],
+#                     [0, 2 ** (-0.5), 0, -(2 ** (-0.5)), 0, 0, 0, 0, 0],
+#                     [0, 0, 0.5**0.5, 0, 0, 0, 0.5**0.5, 0, 0],
+#                     [0, 2 ** (-0.5), 0, 2 ** (-0.5), 0, 0, 0, 0, 0],
+#                     [
+#                         -(6 ** (-0.5)),
+#                         0,
+#                         0,
+#                         0,
+#                         2 * 6 ** (-0.5),
+#                         0,
+#                         0,
+#                         0,
+#                         -(6 ** (-0.5)),
+#                     ],
+#                     [0, 0, 0, 0, 0, 2 ** (-0.5), 0, 2 ** (-0.5), 0],
+#                     [-(2 ** (-0.5)), 0, 0, 0, 0, 0, 0, 0, 2 ** (-0.5)],
+#                 ]
+#             ).detach(),
+#             0,
+#             1,
+#         )
+
+#     def forward(self, edge_distance_vec, x_edge, edge_index, data):
+#         """
+#         Args:
+#             edge_distance_vec (torch.Tensor):   Tensor of shape (..., 3)
+#             x_edge (torch.Tensor):              Tensor of shape (..., emb_size)
+#             edge_index (torch.Tensor):          Tensor of shape (2, nEdges)
+#             data:                               LMDBDataset sample
+#         """
+#         # Calculate spherical harmonics of degree 2 of the points sampled
+#         sphere_irrep2 = o3.spherical_harmonics(
+#             2, edge_distance_vec, True
+#         ).detach()  # (nEdges, 5)
+
+#         if self.edge_level:
+#             # MLP at edge level before pooling.
+#             try:
+#                 # Irrep 0 prediction
+#                 edge_scalar = x_edge
+#                 edge_scalar = self.scalar_MLP(edge_scalar)
+#             except:
+#                 import pdb; pdb.set_trace()
+#             # Irrep 2 prediction
+#             edge_irrep2 = (
+#                 sphere_irrep2[:, :, None] * x_edge[:, None, :]
+#             )  # (nEdges, 5, emb_size)
+#             edge_irrep2 = self.irrep2_MLP(edge_irrep2)
+
+#             node_scalar = scatter_det(
+#                 edge_scalar, edge_index, dim=0, reduce="mean"
+#             )
+#             node_irrep2 = scatter_det(
+#                 edge_irrep2, edge_index, dim=0, reduce="mean"
+#             )
+#         else:
+#             edge_irrep2 = (
+#                 sphere_irrep2[:, :, None] * x_edge[:, None, :]
+#             )  # (nAtoms, 5, emb_size)
+
+#             node_scalar = scatter_det(x_edge, edge_index, dim=0, reduce="mean")
+#             node_irrep2 = scatter_det(
+#                 edge_irrep2, edge_index, dim=0, reduce="mean"
+#             )
+
+#             # Irrep 0 prediction
+#             for i, module in enumerate(self.scalar_MLP):
+#                 node_scalar = module(node_scalar)
+
+#             # Irrep 2 prediction
+#             for i, module in enumerate(self.irrep2_MLP):
+#                 node_irrep2 = module(node_irrep2)
+
+#         scalar = scatter_det(
+#             node_scalar.view(-1), data.batch, dim=0, reduce="sum" if self.extensive else "mean"
+#         )
+#         irrep2 = scatter_det(
+#             node_irrep2.view(-1, 5), data.batch, dim=0, reduce="sum" if self.extensive else "mean"
+#         )
+
+#         # Note (@abhshkdz): If we have separate normalizers on the isotropic and
+#         # anisotropic components (implemented in the trainer), combining the
+#         # scalar and irrep2 predictions here would lead to the incorrect result.
+#         # Instead, we should combine the predictions after the normalizers.
+
+#         return scalar.reshape(-1), irrep2
+
+class Rank2DecompositionEdgeBlock(nn.Module):
+    r"""Prediction of rank 2 tensor
+    Decompose rank 2 tensor with irreps  
+    since it is symmetric we need just irrep degree 0 and 2
+    Parameters
+    ----------
+    emb_size : int
+        size of edge embedding used to compute outer products
+    num_layers : int
+        number of layers of the MLP
+    --------
     """
 
     def __init__(
         self,
-        emb_size: int,
-        num_layers: int = 2,
-        edge_level: bool = False,
-        extensive: bool = False,
+        emb_size,
+        edge_level,
+        extensive = False,
+        num_layers = 2,
     ):
         super().__init__()
         self.emb_size = emb_size
         self.edge_level = edge_level
         self.extensive = extensive
         self.scalar_nonlinearity = nn.SiLU()
-        self.scalar_MLP = nn.Sequential()
-        self.irrep2_MLP = nn.Sequential()
+        self.scalar_MLP = nn.ModuleList()
+        self.irrep2_MLP = nn.ModuleList()
         for i in range(num_layers):
             if i < num_layers - 1:
-                self.scalar_MLP.append(nn.Linear(emb_size, emb_size))
+                self.scalar_MLP.append(nn.Linear(emb_size, emb_size))                
                 self.irrep2_MLP.append(nn.Linear(emb_size, emb_size))
                 self.scalar_MLP.append(self.scalar_nonlinearity)
                 self.irrep2_MLP.append(self.scalar_nonlinearity)
             else:
                 self.scalar_MLP.append(nn.Linear(emb_size, 1))
                 self.irrep2_MLP.append(nn.Linear(emb_size, 1))
+                
+        # Change of basis obtained by stacking the C-G coefficients in the right way 
+        self.change_mat = torch.transpose(torch.tensor([[3 **(-0.5), 0, 0, 0, 3 **(-0.5), 0, 0, 0, 3 **(-0.5)], 
+                  [0, 0, 0, 0, 0, 2 ** (- 0.5), 0, -2 ** (- 0.5), 0], 
+                  [0, 0, -2 ** (- 0.5), 0, 0, 0, 2 ** (- 0.5), 0, 0], 
+                  [0, 2 ** (- 0.5), 0, -2 ** (- 0.5), 0, 0, 0, 0, 0],
+                  [0, 0, 0.5 ** 0.5, 0, 0, 0, 0.5 ** 0.5, 0, 0],
+                  [0, 2 ** (- 0.5), 0, 2 ** (- 0.5), 0, 0, 0, 0, 0],
+                  [- 6 ** (-0.5), 0, 0, 0, 2 * 6 ** (-0.5), 0, 0, 0, -6 ** (-0.5)],
+                  [0, 0, 0, 0, 0, 2 ** (- 0.5), 0, 2 ** (- 0.5), 0],
+                  [- 2 ** (- 0.5), 0, 0, 0, 0, 0, 0, 0, 2 ** (- 0.5)]
+                 ]).detach(), 0, 1)
 
-        # Change of basis obtained by stacking the C-G coefficients
-        self.change_mat = torch.transpose(
-            torch.tensor(
-                [
-                    [3 ** (-0.5), 0, 0, 0, 3 ** (-0.5), 0, 0, 0, 3 ** (-0.5)],
-                    [0, 0, 0, 0, 0, 2 ** (-0.5), 0, -(2 ** (-0.5)), 0],
-                    [0, 0, -(2 ** (-0.5)), 0, 0, 0, 2 ** (-0.5), 0, 0],
-                    [0, 2 ** (-0.5), 0, -(2 ** (-0.5)), 0, 0, 0, 0, 0],
-                    [0, 0, 0.5**0.5, 0, 0, 0, 0.5**0.5, 0, 0],
-                    [0, 2 ** (-0.5), 0, 2 ** (-0.5), 0, 0, 0, 0, 0],
-                    [
-                        -(6 ** (-0.5)),
-                        0,
-                        0,
-                        0,
-                        2 * 6 ** (-0.5),
-                        0,
-                        0,
-                        0,
-                        -(6 ** (-0.5)),
-                    ],
-                    [0, 0, 0, 0, 0, 2 ** (-0.5), 0, 2 ** (-0.5), 0],
-                    [-(2 ** (-0.5)), 0, 0, 0, 0, 0, 0, 0, 2 ** (-0.5)],
-                ]
-            ).detach(),
-            0,
-            1,
-        )
 
-    def forward(self, edge_distance_vec, x_edge, edge_index, data):
-        """
-        Args:
-            edge_distance_vec (torch.Tensor):   Tensor of shape (..., 3)
-            x_edge (torch.Tensor):              Tensor of shape (..., emb_size)
-            edge_index (torch.Tensor):          Tensor of shape (2, nEdges)
-            data:                               LMDBDataset sample
-        """
+    def forward(self, x_edge, egde_vec, edge_index, data):
+        '''evaluate
+        Parameters
+        ----------
+        x_edge : `torch.Tensor`
+            tensor of shape ``(nEdges, emb_size)``
+        egde_vec : `torch.Tensor`
+            tensor of shape ``(nEdges, 3)``
+        data : ``LMDBDataset sample``
+        Returns
+        -------
+        `torch.Tensor`
+            tensor of shape ``(..., 9)``
+        '''
         # Calculate spherical harmonics of degree 2 of the points sampled
-        sphere_irrep2 = o3.spherical_harmonics(
-            2, edge_distance_vec, True
-        ).detach()  # (nEdges, 5)
-
+        sphere_irrep2 = o3.spherical_harmonics(2, egde_vec, True).detach() # (nEdges, 5)
+        
         if self.edge_level:
-            # MLP at edge level before pooling.
-
             # Irrep 0 prediction
-            edge_scalar = x_edge
-            edge_scalar = self.scalar_MLP(edge_scalar)
-
+            for i, module in enumerate(self.scalar_MLP):
+                if i == 0:
+                    edge_scalar = module(x_edge)
+                else:
+                    edge_scalar = module(edge_scalar)
+            
             # Irrep 2 prediction
-            edge_irrep2 = (
-                sphere_irrep2[:, :, None] * x_edge[:, None, :]
-            )  # (nEdges, 5, emb_size)
-            edge_irrep2 = self.irrep2_MLP(edge_irrep2)
-
-            node_scalar = scatter_det(
-                edge_scalar, edge_index, dim=0, reduce="mean"
-            )
-            node_irrep2 = scatter_det(
-                edge_irrep2, edge_index, dim=0, reduce="mean"
-            )
+            edge_irrep2 = sphere_irrep2[:, :, None] * x_edge[:, None, :] # (nEdges, 5, emb_size)
+            for i, module in enumerate(self.irrep2_MLP):
+                if i == 0:
+                    edge_irrep2 = module(edge_irrep2)
+                else:
+                    edge_irrep2 = module(edge_irrep2)
+                    
+            node_scalar = scatter_det(edge_scalar, edge_index, dim=0, reduce="mean")
+            node_irrep2 = scatter_det(edge_irrep2, edge_index, dim=0, reduce="mean")
         else:
-            edge_irrep2 = (
-                sphere_irrep2[:, :, None] * x_edge[:, None, :]
-            )  # (nAtoms, 5, emb_size)
+            edge_irrep2 = sphere_irrep2[:, :, None] * x_edge[:, None, :] # (nAtoms, 5, emb_size)
 
             node_scalar = scatter_det(x_edge, edge_index, dim=0, reduce="mean")
-            node_irrep2 = scatter_det(
-                edge_irrep2, edge_index, dim=0, reduce="mean"
-            )
+            node_irrep2 = scatter_det(edge_irrep2, edge_index, dim=0, reduce="mean")
 
             # Irrep 0 prediction
             for i, module in enumerate(self.scalar_MLP):
-                node_scalar = module(node_scalar)
-
+                if i == 0:
+                    node_scalar = module(node_scalar)
+                else:
+                    node_scalar = module(node_scalar)
+            
             # Irrep 2 prediction
             for i, module in enumerate(self.irrep2_MLP):
-                node_irrep2 = module(node_irrep2)
+                if i == 0:
+                    node_irrep2 = module(node_irrep2)
+                else:
+                    node_irrep2 = module(node_irrep2)              
+        
+        if self.extensive:
+            scalar = scatter_det(node_scalar.view(-1), data.batch, dim=0, reduce="sum")
+            irrep2 = scatter_det(node_irrep2.view(-1, 5), data.batch, dim=0, reduce="sum")
+        else:
+            irrep2 = scatter_det(node_irrep2.view(-1, 5), data.batch, dim=0, reduce="mean")
+            scalar = scatter_det(node_scalar.view(-1), data.batch, dim=0, reduce="mean")
 
-        scalar = scatter_det(
-            node_scalar.view(-1), data.batch, dim=0, reduce="sum" if self.extensive else "mean"
-        )
-        irrep2 = scatter_det(
-            node_irrep2.view(-1, 5), data.batch, dim=0, reduce="sum" if self.extensive else "mean"
-        )
-
-        # Note (@abhshkdz): If we have separate normalizers on the isotropic and
-        # anisotropic components (implemented in the trainer), combining the
-        # scalar and irrep2 predictions here would lead to the incorrect result.
-        # Instead, we should combine the predictions after the normalizers.
-
+        # Change of basis to compute a rank 2 symmetric tensor 
+        
+        vector = torch.zeros((len(data.natoms), 3), device=scalar.device).detach()
+        flatten_irreps = torch.cat([scalar.reshape(-1, 1), vector, irrep2], dim=1)
+        stress = torch.einsum("ab, cb->ca", self.change_mat.to(flatten_irreps.device), flatten_irreps)
+        
         return scalar.reshape(-1), irrep2

@@ -450,7 +450,7 @@ gemnet_oc_onehot_inmag_ff = registry.get_model_class("gemnet_oc_onehot_inmag_ff"
     num_output_afteratom=3,
     num_atom_emb_layers=2,
     num_global_out_layers=2,
-    regress_forces=False,
+    regress_forces=True,
     direct_forces=True,
     use_pbc=True,
     cutoff = 12,   #=12.0, #!
@@ -476,8 +476,8 @@ gemnet_oc_onehot_inmag_ff = registry.get_model_class("gemnet_oc_onehot_inmag_ff"
     num_elements=100,
     otf_graph=False,
     qint_tags=[0, 1, 2],  # calculate quadruplet interactions for all types of nodes #!
-    regress_forces=True,
     regress_stress=True,
+    direct_stress=True
 )
 gemnet_oc_onehot_inmag_emb = registry.get_model_class("gemnet_oc_onehot_inmag_emb")(
     None,
