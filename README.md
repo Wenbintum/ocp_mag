@@ -16,13 +16,16 @@ The Python environment used is the same as in the Open Catalyst Project. Please 
 
 
 ## Citation
-If you employ this codebase in your research, please acknowledge it by citing:
+
+If you use this codebase in your research, please cite the following:
+
+```bibtex
 @article{xu_ocpmag_2024,
-title = {Spin-informed universal graph neural networks for simulating magnetic ordering},
-author = {Wenbin Xu, Rohan Yuri Sanspeur, Adeesh Kolluru, Bowen Deng, Peter Harrington,
-Steven Farrell, Karsten Reuter, and John Kitchin},
-journal = {in preparation},
-year = {2024},
+  title   = {Spin-informed universal graph neural networks for simulating magnetic ordering},
+  author  = {Wenbin Xu, Rohan Yuri Sanspeur, Adeesh Kolluru, Bowen Deng, Peter Harrington,
+             Steven Farrell, Karsten Reuter, and John Kitchin},
+  journal = {In preparation},
+  year    = {2024},
 }
 
 
