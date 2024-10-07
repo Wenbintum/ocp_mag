@@ -8,6 +8,7 @@ This repository houses all the code and data that should allow for the reproduct
 - The main scripts to reproduce results are `schnet_all_16mix_even.py`, `gemnet_all_16mix_even.py`, etc.
 - All models are available in the directory "ocpmodel."
 - Tutorials for anomaly detection and spin optimization are provided in the directory "paper_tutorials."
+- The DFT calculations are available at the following links: [GitHub Repository](https://github.com/yurisanspeur/DFT_calculations_spin_informed_model) and [Zenodo Record](https://zenodo.org/records/13800219)
 
 ## Installation
 
