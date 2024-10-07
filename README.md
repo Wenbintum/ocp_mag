@@ -27,6 +27,7 @@ If you use this codebase in your research, please cite the following:
   journal = {In preparation},
   year    = {2024},
 }
+```
 
 
 # `ocp` by Open Catalyst Project
