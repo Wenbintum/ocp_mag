@@ -13,6 +13,13 @@ from ocpmodels.common.registry import registry
 from ocpmodels.common.utils import conditional_grad
 from ocpmodels.models.base import BaseModel
 
+from torch_geometric.nn.models.dimenet import (
+    ResidualLayer,
+)#!wx
+
+from torch import nn#!wx
+from ocpmodels.models.gemnet_oc.layers.base_layers import Dense, ResidualLayer
+from ocpmodels.models.gemnet_oc.initializers import get_initializer
 
 @registry.register_model("schnet")
 class SchNetWrap(SchNet, BaseModel):
@@ -81,6 +88,29 @@ class SchNetWrap(SchNet, BaseModel):
             readout=readout,
         )
 
+        #out layer
+        self.out_mlp_energy = torch.nn.ModuleList(
+            [ResidualLayer(128, activation="silu") for _ in range(2)]
+        ) #!wx schnet use 128 hidden channel by default
+
+        self.out_mlp_mag = torch.nn.ModuleList(
+            [ResidualLayer(128, activation="silu") for _ in range(2)]
+        ) #!wx schnet use 128 hidden channel by default
+
+        self.out_energy = Dense(
+            128, num_targets, bias=False, activation=None
+        )
+#!wx
+        self.out_mag = Dense(
+            128, num_targets, bias=False, activation=None
+        )
+
+        output_init = "HeOrthogonal"
+        out_initializer = get_initializer(output_init)
+        self.out_energy.reset_parameters(out_initializer)
+        self.out_mag.reset_parameters(out_initializer)
+
+
     @conditional_grad(torch.enable_grad())
     def _forward(self, data):
         z = data.atomic_numbers.long()
@@ -105,20 +135,28 @@ class SchNetWrap(SchNet, BaseModel):
             for interaction in self.interactions:
                 h = h + interaction(h, edge_index, edge_weight, edge_attr)
 
-            h = self.lin1(h)
-            h = self.act(h)
-            h = self.lin2(h)
+            # h = self.lin1(h)
+            # h = self.act(h)
+            # h = self.lin2(h)
 
+            for _layer in self.out_mlp_energy: #!wx
+                h_E = _layer(h) #!wx
+            for _layer in self.out_mlp_mag: #!wx
+                h_M = _layer(h) #!wx
+                
+            h_E = self.out_energy(h_E)
+            h_M = self.out_mag(h_M)
+            
             batch = torch.zeros_like(z) if batch is None else batch
-            energy = scatter(h, batch, dim=0, reduce=self.reduce)
+            energy = scatter(h_E, batch, dim=0, reduce=self.reduce) #!wx
         else:
             energy = super(SchNetWrap, self).forward(z, pos, batch)
-        return energy
+        return energy, h_M
 
     def forward(self, data):
         if self.regress_forces:
             data.pos.requires_grad_(True)
-        energy = self._forward(data)
+        energy, _M = self._forward(data)
 
         if self.regress_forces:
             forces = -1 * (
@@ -129,10 +167,11 @@ class SchNetWrap(SchNet, BaseModel):
                     create_graph=True,
                 )[0]
             )
-            return energy, forces
+            return energy, _M, forces
         else:
-            return energy
+            return energy, _M
 
     @property
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())
+
