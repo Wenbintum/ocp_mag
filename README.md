@@ -1,3 +1,31 @@
+# OCP magmom model for modeling magnetic materials.
+
+## Overview
+
+This repository houses all the code and data that should allow for the reproduction of the results in the paper: 'Spin-informed universal graph neural networks for simulating magnetic ordering'.
+
+- Toy datasets are provided in the directories "test_set" and "demo2" for model testing.
+- The main scripts to reproduce results are `schnet_all_16mix_even.py`, `gemnet_all_16mix_even.py`, etc.
+- All models are available in the directory "ocpmodel."
+- Tutorials for anomaly detection and spin optimization are provided in the directory "paper_tutorials."
+
+## Installation
+
+The Python environment used is the same as in the Open Catalyst Project. Please follow the instructions below.
+
+
+
+## Citation
+If you employ this codebase in your research, please acknowledge it by citing:
+@article{xu_ocpmag_2024,
+title = {Spin-informed universal graph neural networks for simulating magnetic ordering},
+author = {Wenbin Xu, Rohan Yuri Sanspeur, Adeesh Kolluru, Bowen Deng, Peter Harrington,
+Steven Farrell, Karsten Reuter, and John Kitchin},
+journal = {in preparation},
+year = {2024},
+}
+
+
 # `ocp` by Open Catalyst Project
 
 [![CircleCI](https://circleci.com/gh/Open-Catalyst-Project/ocp.svg?style=shield)](https://circleci.com/gh/Open-Catalyst-Project/ocp)
